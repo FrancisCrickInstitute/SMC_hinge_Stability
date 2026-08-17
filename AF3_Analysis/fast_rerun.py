@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Fast, deterministic-path driver for the AF3.0.2 split-per-seed rerun layout,
+including ALL diffusion samples per seed.
+Layout: <root>/<sp>/results/seed_<N>/<complex>/<complex>_seed-<N>_sample-<k>/<complex>_seed-<N>_sample-<k>_summary_confidences.json
+Usage: python3 fast_rerun.py --root <rerun_root> --out <csv> --budget 38 [--maxseed 60] [--nsample 5]
+"""
+import warnings; warnings.filterwarnings('ignore')
+import os, sys, csv, time, argparse
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from hinge_pipeline import metrics_for, FIELDS
+
+SPECIES=['human','mouse','cerevisiae','pombe']
+def main():
+    ap=argparse.ArgumentParser()
+    ap.add_argument('--root',required=True); ap.add_argument('--out',required=True)
+    ap.add_argument('--budget',type=float,default=38.0); ap.add_argument('--maxseed',type=int,default=60)
+    ap.add_argument('--nsample',type=int,default=5)
+    a=ap.parse_args()
+    done=set()
+    if os.path.exists(a.out):
+        import pandas as pd
+        for r in pd.read_csv(a.out).itertuples(): done.add((r.species,int(r.seed),int(r.sample)))
+    new=not os.path.exists(a.out); fh=open(a.out,'a',newline=''); w=csv.DictWriter(fh,fieldnames=FIELDS)
+    if new: w.writeheader()
+    t0=time.time(); n=0
+    for sp in SPECIES:
+        complex=f'{sp}_cohesin_hinge_harmonized'
+        base=os.path.join(a.root,sp,'results')
+        for N in range(1,a.maxseed+1):
+            seeddir=os.path.join(base,f'seed_{N}',complex)
+            if not os.path.isdir(seeddir): continue
+            for k in range(a.nsample):
+                if (sp,N,k) in done: continue
+                if time.time()-t0>a.budget:
+                    fh.close(); import pandas as pd; print(f'processed={n} total={len(pd.read_csv(a.out))}'); return
+                tag=f'{complex}_seed-{N}_sample-{k}'
+                d=os.path.join(seeddir,f'seed-{N}_sample-{k}')
+                summ=os.path.join(d,f'{tag}_summary_confidences.json')
+                if not os.path.exists(summ): continue
+                model=os.path.join(d,f'{tag}_model.cif')
+                conf=os.path.join(d,f'{tag}_confidences.json')
+                try:
+                    row=dict(species=sp,seed=N,sample=k); row.update(metrics_for(model,conf,summ))
+                    w.writerow(row); fh.flush(); n+=1
+                except Exception as e:
+                    sys.stderr.write(f'ERR {sp} {N}.{k}: {e}\n')
+    fh.close(); import pandas as pd; print(f'processed={n} total={len(pd.read_csv(a.out))} DONE')
+
+if __name__=='__main__': main()
